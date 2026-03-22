@@ -1,26 +1,11 @@
 #include <windows.h>
-#include <d3d11.h>
 #include <vector>
 #include <cmath>
 
-#pragma comment(lib, "d3d11.lib")
-#pragma comment(lib, "dxgi.lib")
+#pragma comment(lib, "user32.lib")
+#pragma comment(lib, "gdi32.lib")
 
-// ==================== OFFSETS (актуальные для CS2) ====================
-namespace offsets {
-    // client.dll
-    constexpr uintptr_t dwLocalPlayerPawn = 0x180FE88;
-    constexpr uintptr_t dwEntityList = 0x1949E58;
-    constexpr uintptr_t dwViewMatrix = 0x1985B60;
-    
-    // C_CSPlayerPawn
-    constexpr uintptr_t m_iHealth = 0x344;
-    constexpr uintptr_t m_iTeamNum = 0x3E3;
-    constexpr uintptr_t m_bIsAlive = 0xEB0;
-    constexpr uintptr_t m_pGameSceneNode = 0x328;
-}
-
-// ==================== MATH ====================
+// ==================== СТРУКТУРЫ ====================
 struct Vector2 {
     float x, y;
     Vector2() : x(0), y(0) {}
@@ -33,22 +18,15 @@ struct Vector3 {
     Vector3(float x, float y, float z) : x(x), y(y), z(z) {}
 };
 
-bool WorldToScreen(const Vector3& worldPos, Vector2& screenPos, float* viewMatrix) {
-    float w = viewMatrix[12] * worldPos.x + viewMatrix[13] * worldPos.y + 
-              viewMatrix[14] * worldPos.z + viewMatrix[15];
-    
-    if (w < 0.01f) return false;
-    
-    float invW = 1.0f / w;
-    float x = (viewMatrix[0] * worldPos.x + viewMatrix[1] * worldPos.y + 
-               viewMatrix[2] * worldPos.z + viewMatrix[3]) * invW;
-    float y = (viewMatrix[4] * worldPos.x + viewMatrix[5] * worldPos.y + 
-               viewMatrix[6] * worldPos.z + viewMatrix[7]) * invW;
-    
-    screenPos.x = (x + 1.0f) * 0.5f * GetSystemMetrics(SM_CXSCREEN);
-    screenPos.y = (1.0f - y) * 0.5f * GetSystemMetrics(SM_CYSCREEN);
-    
-    return true;
+// ==================== ОФФСЕТЫ (актуальные) ====================
+namespace offsets {
+    constexpr uintptr_t dwLocalPlayerPawn = 0x180FE88;
+    constexpr uintptr_t dwEntityList = 0x1949E58;
+    constexpr uintptr_t dwViewMatrix = 0x1985B60;
+    constexpr uintptr_t m_iHealth = 0x344;
+    constexpr uintptr_t m_iTeamNum = 0x3E3;
+    constexpr uintptr_t m_bIsAlive = 0xEB0;
+    constexpr uintptr_t m_pGameSceneNode = 0x328;
 }
 
 // ==================== MEMORY ====================
@@ -70,7 +48,6 @@ uintptr_t GetEntity(uintptr_t entityList, int index) {
 Vector3 GetBonePosition(uintptr_t playerPawn, int boneId) {
     uintptr_t gameSceneNode = Read<uintptr_t>(playerPawn + offsets::m_pGameSceneNode);
     if (!gameSceneNode) return Vector3(0, 0, 0);
-    
     uintptr_t boneArray = Read<uintptr_t>(gameSceneNode + 0x180);
     if (!boneArray) return Vector3(0, 0, 0);
     
@@ -78,51 +55,75 @@ Vector3 GetBonePosition(uintptr_t playerPawn, int boneId) {
     pos.x = Read<float>(boneArray + boneId * 32 + 12);
     pos.y = Read<float>(boneArray + boneId * 32 + 16);
     pos.z = Read<float>(boneArray + boneId * 32 + 20);
-    
     return pos;
+}
+
+// ==================== WORLD TO SCREEN ====================
+bool WorldToScreen(const Vector3& worldPos, Vector2& screenPos, float* viewMatrix) {
+    float w = viewMatrix[12] * worldPos.x + viewMatrix[13] * worldPos.y + 
+              viewMatrix[14] * worldPos.z + viewMatrix[15];
+    
+    if (w < 0.01f) return false;
+    
+    float invW = 1.0f / w;
+    float x = (viewMatrix[0] * worldPos.x + viewMatrix[1] * worldPos.y + 
+               viewMatrix[2] * worldPos.z + viewMatrix[3]) * invW;
+    float y = (viewMatrix[4] * worldPos.x + viewMatrix[5] * worldPos.y + 
+               viewMatrix[6] * worldPos.z + viewMatrix[7]) * invW;
+    
+    screenPos.x = (x + 1.0f) * 0.5f * GetSystemMetrics(SM_CXSCREEN);
+    screenPos.y = (1.0f - y) * 0.5f * GetSystemMetrics(SM_CYSCREEN);
+    
+    return true;
 }
 
 // ==================== ESP ====================
 bool g_ESPEnabled = true;
-ID3D11Device* g_pDevice = nullptr;
-ID3D11DeviceContext* g_pContext = nullptr;
-WNDPROC g_oWndProc = nullptr;
-HANDLE g_hThread = nullptr;
 bool g_running = true;
+HWND g_hGameWnd = nullptr;
+HDC g_hdc = nullptr;
 
-void DrawBox(float x, float y, float w, float h, float r, float g, float b, float a) {
-    if (!g_pContext) return;
+void DrawBox(float x, float y, float w, float h) {
+    if (!g_hdc) return;
     
-    // Простой прямоугольник через буфер (упрощённо для демонстрации)
-    // В реальном проекте здесь был бы полноценный рендер через DirectX
-    // Для теста выводим в DebugView
-    static int frameCount = 0;
-    if (frameCount++ % 100 == 0) {
-        char buf[256];
-        sprintf_s(buf, "ESP Active - Enemy at: %.0f, %.0f (size: %.0f)", x, y, w);
-        OutputDebugStringA(buf);
-    }
+    HPEN pen = CreatePen(PS_SOLID, 2, RGB(255, 255, 255));
+    HBRUSH brush = (HBRUSH)GetStockObject(NULL_BRUSH);
+    HPEN oldPen = (HPEN)SelectObject(g_hdc, pen);
+    HBRUSH oldBrush = (HBRUSH)SelectObject(g_hdc, brush);
+    
+    Rectangle(g_hdc, (int)x, (int)y, (int)(x + w), (int)(y + h));
+    
+    SelectObject(g_hdc, oldPen);
+    SelectObject(g_hdc, oldBrush);
+    DeleteObject(pen);
 }
 
 void RenderESP() {
     if (!g_ESPEnabled) return;
     
+    g_hdc = GetDC(g_hGameWnd);
+    if (!g_hdc) return;
+    
     uintptr_t client = GetModuleBase(L"client.dll");
-    if (!client) return;
+    if (!client) {
+        ReleaseDC(g_hGameWnd, g_hdc);
+        return;
+    }
     
     float* viewMatrix = (float*)(client + offsets::dwViewMatrix);
-    if (!viewMatrix) return;
+    if (!viewMatrix) {
+        ReleaseDC(g_hGameWnd, g_hdc);
+        return;
+    }
     
     uintptr_t localPlayer = Read<uintptr_t>(client + offsets::dwLocalPlayerPawn);
-    if (!localPlayer) return;
+    if (!localPlayer) {
+        ReleaseDC(g_hGameWnd, g_hdc);
+        return;
+    }
     
     int localTeam = Read<int>(localPlayer + offsets::m_iTeamNum);
-    if (localTeam != 2 && localTeam != 3) return;
-    
     uintptr_t entityList = Read<uintptr_t>(client + offsets::dwEntityList);
-    if (!entityList) return;
-    
-    int enemiesFound = 0;
     
     for (int i = 1; i <= 64; i++) {
         uintptr_t playerPawn = GetEntity(entityList, i);
@@ -147,89 +148,68 @@ void RenderESP() {
         float height = screenFeet.y - screenHead.y;
         float width = height * 0.5f;
         
-        enemiesFound++;
-        
-        // Рисуем белый бокс
-        DrawBox(screenHead.x - width/2, screenHead.y, width, height, 1, 1, 1, 1);
+        DrawBox(screenHead.x - width/2, screenHead.y, width, height);
     }
     
-    // Выводим количество врагов в консоль для отладки
-    static int lastEnemies = 0;
-    if (enemiesFound != lastEnemies) {
-        char buf[100];
-        sprintf_s(buf, "[ESP] Enemies found: %d", enemiesFound);
-        OutputDebugStringA(buf);
-        lastEnemies = enemiesFound;
-    }
+    ReleaseDC(g_hGameWnd, g_hdc);
 }
 
 // ==================== HOOKS ====================
+WNDPROC g_oWndProc = nullptr;
+
 LRESULT CALLBACK hkWndProc(HWND hWnd, UINT uMsg, WPARAM wParam, LPARAM lParam) {
     if (uMsg == WM_KEYDOWN && wParam == VK_INSERT) {
         g_ESPEnabled = !g_ESPEnabled;
-        
-        // Выводим статус в DebugView
-        if (g_ESPEnabled) {
-            OutputDebugStringA("[ESP] ENABLED");
-        } else {
-            OutputDebugStringA("[ESP] DISABLED");
-        }
     }
+    
+    if (uMsg == WM_PAINT && g_ESPEnabled) {
+        RenderESP();
+    }
+    
     return CallWindowProcW(g_oWndProc, hWnd, uMsg, wParam, lParam);
 }
 
 // ==================== MAIN THREAD ====================
 DWORD WINAPI MainThread(LPVOID lpParam) {
-    // Ждём загрузки client.dll
     while (!GetModuleHandleW(L"client.dll")) {
         Sleep(100);
         if (!g_running) return 0;
     }
     
-    // Находим окно игры
-    HWND hGameWnd = nullptr;
-    while (!hGameWnd) {
-        hGameWnd = FindWindowW(nullptr, L"Counter-Strike 2");
-        if (!hGameWnd) {
-            hGameWnd = FindWindowW(nullptr, L"Counter-Strike: Global Offensive");
+    while (!g_hGameWnd) {
+        g_hGameWnd = FindWindowW(nullptr, L"Counter-Strike 2");
+        if (!g_hGameWnd) {
+            g_hGameWnd = FindWindowW(nullptr, L"Counter-Strike: Global Offensive");
         }
         Sleep(100);
         if (!g_running) return 0;
     }
     
-    // Устанавливаем хук окна
-    g_oWndProc = (WNDPROC)SetWindowLongPtrW(hGameWnd, GWLP_WNDPROC, (LONG_PTR)hkWndProc);
+    g_oWndProc = (WNDPROC)SetWindowLongPtrW(g_hGameWnd, GWLP_WNDPROC, (LONG_PTR)hkWndProc);
     
-    OutputDebugStringA("[CS2] DLL injected successfully! Press INSERT to toggle ESP");
+    OutputDebugStringA("[CS2] ESP Hack Loaded! Press INSERT to toggle");
     
-    // Основной цикл рендера
     while (g_running) {
-        RenderESP();
-        Sleep(16); // ~60 FPS
-    }
-    
-    // Восстанавливаем оригинальный WndProc
-    if (g_oWndProc) {
-        SetWindowLongPtrW(hGameWnd, GWLP_WNDPROC, (LONG_PTR)g_oWndProc);
+        if (g_ESPEnabled) {
+            RenderESP();
+        }
+        Sleep(16);
     }
     
     return 0;
 }
 
-// ==================== DLL ENTRY POINT ====================
+// ==================== DLL ENTRY ====================
 BOOL APIENTRY DllMain(HMODULE hModule, DWORD ul_reason_for_call, LPVOID lpReserved) {
     switch (ul_reason_for_call) {
     case DLL_PROCESS_ATTACH:
         DisableThreadLibraryCalls(hModule);
-        g_running = true;
-        g_hThread = CreateThread(nullptr, 0, MainThread, nullptr, 0, nullptr);
+        CreateThread(nullptr, 0, MainThread, nullptr, 0, nullptr);
         break;
-        
     case DLL_PROCESS_DETACH:
         g_running = false;
-        if (g_hThread) {
-            WaitForSingleObject(g_hThread, 1000);
-            CloseHandle(g_hThread);
+        if (g_hGameWnd && g_oWndProc) {
+            SetWindowLongPtrW(g_hGameWnd, GWLP_WNDPROC, (LONG_PTR)g_oWndProc);
         }
         break;
     }
